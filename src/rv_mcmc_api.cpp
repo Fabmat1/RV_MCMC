@@ -3,6 +3,7 @@
 #include "lomb_scargle_periodogram.h"
 #include "maths.h"
 #include "vector_operations.h"
+#include "models.h"
 
 #include <algorithm>
 #include <cmath>

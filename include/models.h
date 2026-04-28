@@ -1,7 +1,10 @@
 #pragma once
 
+#include "rv_mcmc/api.h"          // brings in rv_mcmc::MCMCConfig
 #include <string>
 #include <vector>
+
+using MCMCConfig = rv_mcmc::MCMCConfig;
 
 // ---------------------------------------------------------------------------
 //  MCMC configuration
