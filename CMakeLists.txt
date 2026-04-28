@@ -1,72 +1,40 @@
 cmake_minimum_required(VERSION 3.16)
-project(subdwarf_rv_simulation CXX)
+project(rv_mcmc CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# ---- default to Release build with aggressive optimizations ----
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
+option(RV_MCMC_BUILD_CLI    "Build standalone CLI (rv_mcmc.cpp)"  OFF)
+option(RV_MCMC_BUILD_PYBIND "Build python bindings"               OFF)
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
-
-# optional: LTO (link-time optimization) for even more inlining
-include(CheckIPOSupported)
-check_ipo_supported(RESULT LTO_SUPPORTED)
-if(LTO_SUPPORTED)
-    message(STATUS "LTO enabled")
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-endif()
-
-# ---- dependencies ----
-find_package(Boost REQUIRED COMPONENTS program_options iostreams)
 find_package(OpenMP REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET fftw3)
+find_package(FFTW3  REQUIRED)        # or pkg_check_modules
 
-find_path(GNUPLOT_IOSTREAM_INCLUDE_DIR
-    NAMES gnuplot-iostream.h
-    HINTS
-        ${CMAKE_INCLUDE_PATH}
-        $ENV{HOME}/Projects
-        /usr/include
-        /usr/local/include
-    DOC "Directory containing gnuplot-iostream.h"
-)
-
-if(NOT GNUPLOT_IOSTREAM_INCLUDE_DIR)
-    message(FATAL_ERROR
-        "Could not find gnuplot-iostream.h.\n"
-        "Set -DGNUPLOT_IOSTREAM_DIR=/path/to/dir or add it to CMAKE_INCLUDE_PATH.")
-else()
-    message(STATUS "Found gnuplot-iostream.h in: ${GNUPLOT_IOSTREAM_INCLUDE_DIR}")
-endif()
-
-# ---- library of reusable source files ----
-add_library(rv_lib STATIC
-    src/models.cpp
-    src/maths.cpp
-    src/vector_operations.cpp
+# ----- core library (no main, no boost::program_options) -----
+add_library(rv_mcmc STATIC
+    src/exceptions.cpp
     src/file_io.cpp
     src/lomb_scargle_periodogram.cpp
-    src/exceptions.cpp
+    src/maths.cpp
+    src/models.cpp
+    src/vector_operations.cpp
+    src/rv_mcmc_api.cpp
 )
-
-target_include_directories(rv_lib PUBLIC
+target_include_directories(rv_mcmc PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${GNUPLOT_IOSTREAM_INCLUDE_DIR}
+)
+target_link_libraries(rv_mcmc
+    PUBLIC  Eigen3::Eigen
+    PRIVATE OpenMP::OpenMP_CXX fftw3
 )
 
-target_link_libraries(rv_lib PUBLIC
-    Boost::program_options
-    Boost::iostreams
-    OpenMP::OpenMP_CXX
-    Eigen3::Eigen
-    PkgConfig::FFTW3
-)
+# Optional: legacy CLI (only compiled if requested)
+if (RV_MCMC_BUILD_CLI)
+    find_package(Boost REQUIRED COMPONENTS program_options)
+    add_executable(rv_mcmc_cli src/rv_mcmc.cpp)
+    target_link_libraries(rv_mcmc_cli PRIVATE rv_mcmc Boost::program_options)
+endif()
 
-# ---- main executable ----
-add_executable(rv_mcmc src/rv_mcmc.cpp)
-target_link_libraries(rv_mcmc PRIVATE rv_lib)
+target_compile_definitions(rv_mcmc PRIVATE) 

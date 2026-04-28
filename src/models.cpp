@@ -23,6 +23,10 @@
 
 #include <omp.h>
 
+#ifdef RV_MCMC_USE_GNUPLOT
+#include "gnuplot-iostream.h"
+#endif
+
 using namespace std;
 
 // ===================================================================
@@ -360,7 +364,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
 
     vector<int> chain_accepted(Ntemp, 0);
     vector<int> chain_tried(Ntemp, 0);
-
+#ifdef RV_MCMC_USE_GNUPLOT
     // ---- gnuplot ----
     unique_ptr<Gnuplot> gp;
     if (!cfg.noplot) {
@@ -368,6 +372,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         *gp << "set term qt 0 persist\n"
             << "set title 'Realtime RV Curve'\n";
     }
+#endif
 
     // ---- main loop ----
     auto t0 = chrono::high_resolution_clock::now();
@@ -400,7 +405,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
                 chain_accepted[t] = 0;
                 chain_tried[t] = 0;
             }
-
+#ifdef RV_MCMC_USE_GNUPLOT
             if (gp) {
                 auto& s = state[0];
                 double per = to_real_period(s[iLPER]);
@@ -427,7 +432,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
                 gp->send1d(pts);
             }
         }
-
+#endif
         // ============================================================
         //  1. Parallel MH step
         // ============================================================
@@ -534,20 +539,21 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         if (j < Nburn) continue;
         if ((j - Nburn) % chain_thin != 0) continue;
 
+        const auto& s = state[0];
+        double row[6];
+        row[0] = to_real_period(s[iLPER]);
+        row[1] = s[iAMP];
+        row[2] = s[iOFF];
+        row[3] = s[iPH];
+        if (ecc) { row[4] = s[iECC]; row[5] = s[iOMG]; }
+
         if (chain_file) {
-            const auto& s = state[0];
-            double row[6];
-            row[0] = to_real_period(s[iLPER]);  // period in days
-            row[1] = s[iAMP];                   // amplitude
-            row[2] = s[iOFF];                   // offset
-            row[3] = s[iPH];                    // phase [-0.5, 0.5]
-            if (ecc) {
-                row[4] = s[iECC];               // eccentricity
-                row[5] = s[iOMG];               // omega in degrees
-            }
             fwrite(row, sizeof(double), dim, chain_file);
-            ++chain_count;
         }
+        if (cfg.chain_buffer) {
+            cfg.chain_buffer->emplace_back(row, row + dim);
+        }
+        ++chain_count;
     }
 
     // ---- close chain file ----
@@ -583,12 +589,13 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         cout << "\n";
     }
     cout << "\n";
-
+#ifdef RV_MCMC_USE_GNUPLOT
     if (gp) {
         *gp << "exit\n";
         gp.reset();
         system("pkill -f gnuplot_qt");
     }
+#endif
 }
 
 

@@ -75,6 +75,11 @@ struct MCMCConfig {
     // Add to MCMCConfig struct:
     int chain_thin = 10;                 // Thinning factor for chain output
     std::string chain_output_dir = "";   // Directory for chain.bin / chain_meta.txt
+
+    // If non-null, every (post-burn-in, thinned) sample is also pushed here.
+    // One row per sample, length = (eccentric ? 6 : 4):
+    //   [period, amplitude, offset, phase, (eccentricity, omega)]
+    std::vector<std::vector<double>>* chain_buffer = nullptr;
 };
 
 
