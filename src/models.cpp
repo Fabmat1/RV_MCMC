@@ -431,8 +431,8 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
                 gp->send1d(curve);
                 gp->send1d(pts);
             }
-        }
 #endif
+        }
         // ============================================================
         //  1. Parallel MH step
         // ============================================================
@@ -536,24 +536,28 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         // ============================================================
         //  4. Write T=1 chain sample (post burn-in, thinned)
         // ============================================================
-        if (j < Nburn) continue;
-        if ((j - Nburn) % chain_thin != 0) continue;
+            if (j < Nburn) continue;
+            if ((j - Nburn) % chain_thin != 0) continue;
 
-        const auto& s = state[0];
-        double row[6];
-        row[0] = to_real_period(s[iLPER]);
-        row[1] = s[iAMP];
-        row[2] = s[iOFF];
-        row[3] = s[iPH];
-        if (ecc) { row[4] = s[iECC]; row[5] = s[iOMG]; }
+            const auto& s = state[0];
+            double row[6];
+            row[0] = to_real_period(s[iLPER]);   // period in days
+            row[1] = s[iAMP];                    // amplitude
+            row[2] = s[iOFF];                    // offset
+            row[3] = s[iPH];                     // phase [-0.5, 0.5]
+            if (ecc) {
+                row[4] = s[iECC];                // eccentricity
+                row[5] = s[iOMG];                // omega in degrees
+            }
 
-        if (chain_file) {
-            fwrite(row, sizeof(double), dim, chain_file);
-        }
-        if (cfg.chain_buffer) {
-            cfg.chain_buffer->emplace_back(row, row + dim);
-        }
-        ++chain_count;
+            if (chain_file) {
+                fwrite(row, sizeof(double), dim, chain_file);
+            }
+            if (cfg.chain_buffer) {
+                cfg.chain_buffer->emplace_back(row, row + dim);
+            }
+            ++chain_count;
+        }   
     }
 
     // ---- close chain file ----

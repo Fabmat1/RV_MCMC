@@ -1,10 +1,9 @@
 #pragma once
 //
 //  Public C++ API of the RV_MCMC submodule.
-//  This is the *only* header ASTRA should need to include.
+//  IMPORTANT: this header is the *only* one ASTRA should include.
+//             It must NOT pull in models.h (which leaks `Star`).
 //
-
-#include "models.h"   // re-exports MCMCConfig
 
 #include <map>
 #include <string>
@@ -12,93 +11,96 @@
 
 namespace rv_mcmc {
 
-// ----------------------------- Inputs ---------------------------------------
+// ─────────────────────────── MCMC configuration ────────────────────────────
+struct MCMCConfig {
+    bool eccentric = false;
+    int  n_period_bins  = 100;
+    int  n_param_bins   = 1000;
 
-struct RVData {
-    std::vector<double> bjd;     // observation times (BJD)
-    std::vector<double> rv;      // radial velocities  (km/s)
-    std::vector<double> rv_err;  // 1-sigma errors     (km/s)
+    double amp_lim    = 500.0;
+    double offset_lim = 500.0;
+    double amp_min    = 0.0;
+    double amp_max    = 0.0;
+    double offset_min = 0.0;
+    double offset_max = 0.0;
+    double phase_min  = -0.5;
+    double phase_max  = 0.5;
+    double ecc_min    = 0.0;
+    double ecc_max    = 0.9999;
+    double omega_min  = 0.0;
+    double omega_max  = 360.0;
+
+    double min_period = 0.05;
+    double max_period = 50.0;
+
+    int n_samples = 0;
+    int n_burn_in = 1000000;
+
+    double period_step = 0.0, amp_step = 0.0, offset_step = 0.0;
+    double phase_step  = 0.0, eccentricity_step = 0.0, omega_step = 0.0;
+
+    double period_0 = 0.0, amp_0 = 0.0, offset_0 = 0.0;
+    double phase_0  = 0.0, eccentricity_0 = 0.0, omega_0 = 0.0;
+
+    bool noplot   = false;
+    bool lc_prior = false;
+    std::vector<std::vector<double>> lc_pgram_data;
+
+    int    n_temperatures  = 16;
+    double max_temperature = 100.0;
+    int    swap_interval   = 20;
+    int    adapt_start     = 1000;
+    int    adapt_interval  = 100;
+    double target_accept   = 0.234;
+    double adapt_scale_min = 1e-12;
+    double adapt_scale_max = 100.0;
+
+    int         chain_thin = 10;
+    std::string chain_output_dir = "";
+    std::vector<std::vector<double>>* chain_buffer = nullptr;
 };
 
-struct LCPriorData {
-    std::vector<double> periods; // period grid (days), monotonic
-    std::vector<double> powers;  // periodogram power on that grid (>=0)
+// ─────────────────────────── Inputs / Outputs ──────────────────────────────
+struct RVData       { std::vector<double> bjd, rv, rv_err; };
+struct LCPriorData  { std::vector<double> periods, powers; };
+
+struct Histogram1D  {
+    std::string param_name;
+    std::vector<double> edges, counts;
+    bool log_scale = false;
 };
-
-// ----------------------------- Outputs --------------------------------------
-
-struct Histogram1D {
-    std::string         param_name;
-    std::vector<double> edges;     // length n_bins+1
-    std::vector<double> counts;    // length n_bins
-    bool                log_scale = false; // edges are linear in log10 if true
+struct Histogram2D  {
+    std::string x_param, y_param;
+    std::vector<double> x_edges, y_edges;
+    std::vector<std::vector<double>> counts;
+    bool x_log = false, y_log = false;
 };
-
-struct Histogram2D {
-    std::string                       x_param, y_param;
-    std::vector<double>               x_edges, y_edges;
-    std::vector<std::vector<double>>  counts; // [nx][ny]
-    bool                              x_log = false, y_log = false;
-};
-
-// Lower-triangular corner: diagonals[k] is the marginal of param k,
-// off_diagonals[i][j] (i>j) is the joint marginal of params (j on x, i on y).
 struct CornerPlot {
-    std::vector<std::string>                 param_names;
-    std::vector<Histogram1D>                 diagonals;
-    std::vector<std::vector<Histogram2D>>    off_diagonals;
+    std::vector<std::string> param_names;
+    std::vector<Histogram1D> diagonals;
+    std::vector<std::vector<Histogram2D>> off_diagonals;
 };
-
-struct ParamEstimate {
-    double median = 0.0;
-    double q16    = 0.0;   // 16th percentile (lower 1-sigma)
-    double q84    = 0.0;   // 84th percentile (upper 1-sigma)
-};
-
+struct ParamEstimate { double median = 0, q16 = 0, q84 = 0; };
 struct Solution {
-    int    rank       = 0;
-    double period     = 0.0;
-    double prominence = 0.0;
-    int    n_samples  = 0;
+    int rank = 0; double period = 0, prominence = 0; int n_samples = 0;
     std::map<std::string, ParamEstimate> parameters;
-    CornerPlot corner;     // built only from samples inside this peak
+    CornerPlot corner;
 };
-
 struct FitResult {
-    bool        success = false;
+    bool success = false;
     std::string error_message;
-
-    // Reference time: T0 [BJD] = t_ref + phase * period
     double t_ref = 0.0;
-
-    std::vector<std::string>              param_names; // length = chain row dim
-    std::vector<std::vector<double>>      chain;       // [n_samples][n_params]
-
-    std::vector<double> periodogram_periods;  // days (descending or ascending)
-    std::vector<double> periodogram_power;
-
-    CornerPlot              full_corner;
-    std::vector<Solution>   solutions;        // sorted by prominence (descending)
+    std::vector<std::string> param_names;
+    std::vector<std::vector<double>> chain;
+    std::vector<double> periodogram_periods, periodogram_power;
+    CornerPlot full_corner;
+    std::vector<Solution> solutions;
 };
 
-// ----------------------------- Configuration helpers ------------------------
-
-// Convenience builder for ASTRA: returns an MCMCConfig with sensible defaults
-// for a typical sub-dwarf RV fit.
 MCMCConfig default_config(bool eccentric = false);
 
-// ----------------------------- Main entry point -----------------------------
-
-// Runs the full pipeline (periodogram → MCMC → peak detection → histograms).
-//   data      : RV observations (≥4 points required).
-//   cfg       : MCMC + bounds (see MCMCConfig in models.h).
-//   lc_prior  : optional LC periodogram prior; pass nullptr to disable.
-//
-// Configuration knobs added by this API (set on cfg before calling):
-//   cfg.n_param_bins  → bins per 1D marginal (default 100, capped 500)
-//   cfg.n_period_bins → bins along period axis in 2D plots (default 100)
-FitResult run_fit(const RVData&        data,
-                  MCMCConfig           cfg,
-                  const LCPriorData*   lc_prior = nullptr);
+FitResult run_fit(const RVData&     data,
+                  MCMCConfig        cfg,
+                  const LCPriorData* lc_prior = nullptr);
 
 } // namespace rv_mcmc
