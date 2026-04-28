@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(rv_mcmc CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -36,5 +38,3 @@ if (RV_MCMC_BUILD_CLI)
     add_executable(rv_mcmc_cli src/rv_mcmc.cpp)
     target_link_libraries(rv_mcmc_cli PRIVATE rv_mcmc Boost::program_options)
 endif()
-
-target_compile_definitions(rv_mcmc PRIVATE) 
