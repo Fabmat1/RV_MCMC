@@ -9,7 +9,9 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -67,52 +69,11 @@ double rv_curve(double t, double amplitude, double gamma, double period,
 
 
 // ===================================================================
-//  Simple Cholesky decomposition of a symmetric positive-definite
-//  matrix (d×d, stored as vector<vector<double>>).
-//  Returns the lower-triangular factor L such that A = L L^T.
-// ===================================================================
-static vector<vector<double>> cholesky(const vector<vector<double>>& A) {
-    int d = (int)A.size();
-    vector<vector<double>> L(d, vector<double>(d, 0.0));
-    for (int i = 0; i < d; ++i) {
-        for (int j = 0; j <= i; ++j) {
-            double sum = 0.0;
-            for (int k = 0; k < j; ++k)
-                sum += L[i][k] * L[j][k];
-            if (i == j) {
-                double diag = A[i][i] - sum;
-                // Numerical safety: clamp to small positive value
-                L[i][j] = sqrt(max(diag, 1e-30));
-            } else {
-                L[i][j] = (A[i][j] - sum) / L[j][j];
-            }
-        }
-    }
-    return L;
-}
-
-// ===================================================================
-//  Multiply lower-triangular L by vector z:  result = L * z
-// ===================================================================
-static vector<double> Lmul(const vector<vector<double>>& L,
-                            const vector<double>& z) {
-    int d = (int)z.size();
-    vector<double> r(d, 0.0);
-    for (int i = 0; i < d; ++i)
-        for (int j = 0; j <= i; ++j)
-            r[i] += L[i][j] * z[j];
-    return r;
-}
-
-
-// ===================================================================
 //  Parallel-tempered, adaptive-Metropolis MCMC for RV fitting.
 //
-//  Changes from previous version:
-//  - Each temperature chain runs on its own OMP thread
-//  - Internal parameter space uses log10(period) for proper scaling
-//  - Fixed Welford covariance update
-//  - Per-chain RNG to avoid thread contention
+//  This version writes the T=1 chain to a binary file instead of
+//  accumulating into fixed-resolution histograms.  Adaptive binning
+//  and histogram construction happen in Python post-processing.
 // ===================================================================
 void Star::run_rv_mcmc(const MCMCConfig& cfg) {
 
@@ -120,12 +81,8 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
     const int  dim = ecc ? 6 : 4;
 
     // Parameter order: [log10(period), amplitude, offset, phase, (ecc, omega)]
-    // NOTE: internally we work in log10(period) so the covariance
-    //       adaptation and proposals scale correctly across decades.
     enum { iLPER=0, iAMP=1, iOFF=2, iPH=3, iECC=4, iOMG=5 };
 
-    const int  Nx    = cfg.n_period_bins;
-    const int  Ny    = cfg.n_param_bins;
     const int  Nsim  = cfg.n_samples;
     const int  Nburn = cfg.n_burn_in;
     const int  Ntot  = Nsim + Nburn;
@@ -147,39 +104,33 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
     for (auto T : temperatures) cout << " " << fixed << setprecision(1) << T;
     cout << "\n";
 
-    // ---- allocate histograms ----
-    auto zeros2d = [](int r, int c) {
-        return vector<vector<double>>(r, vector<double>(c, 0.0));
-    };
-    period_amp_histogram    = zeros2d(Nx, Ny);
-    period_offset_histogram = zeros2d(Nx, Ny);
-    period_phase_histogram  = zeros2d(Nx, Ny);
-    amp_offset_histogram    = zeros2d(Ny, Ny);
-    amp_phase_histogram     = zeros2d(Ny, Ny);
-    offset_phase_histogram  = zeros2d(Ny, Ny);
-    if (ecc) {
-        period_ecc_histogram   = zeros2d(Nx, Ny);
-        period_omega_histogram = zeros2d(Nx, Ny);
-        amp_ecc_histogram      = zeros2d(Ny, Ny);
-        amp_omega_histogram    = zeros2d(Ny, Ny);
-        offset_ecc_histogram   = zeros2d(Ny, Ny);
-        offset_omega_histogram = zeros2d(Ny, Ny);
-        phase_ecc_histogram    = zeros2d(Ny, Ny);
-        phase_omega_histogram  = zeros2d(Ny, Ny);
-        ecc_omega_histogram    = zeros2d(Ny, Ny);
-    }
+    // ---- chain output file ----
+    const int chain_thin = max(cfg.chain_thin, 1);
+    FILE* chain_file = nullptr;
+    int   chain_count = 0;
 
-    // ---- bin edges (in real space for histogramming) ----
-    vector<double> period_edges = linspace(log_min_p, log_max_p, Nx+1);
-    for (auto& v : period_edges) v = pow(10.0, v);
+    if (!cfg.chain_output_dir.empty()) {
+        string bin_path  = cfg.chain_output_dir + "chain.bin";
+        string meta_path = cfg.chain_output_dir + "chain_meta.txt";
 
-    vector<double> amp_edges    = linspace(0.0, cfg.amp_lim, Ny+1);
-    vector<double> phase_edges  = linspace(-0.5, 0.5, Ny+1);
-    vector<double> offset_edges = linspace(-cfg.offset_lim, cfg.offset_lim, Ny+1);
-    vector<double> ecc_edges, omega_edges;
-    if (ecc) {
-        ecc_edges   = linspace(0.0, 1.0, Ny+1);
-        omega_edges = linspace(0.0, 360.0, Ny+1);
+        chain_file = fopen(bin_path.c_str(), "wb");
+        if (!chain_file)
+            throw runtime_error("Cannot open chain file: " + bin_path);
+        setvbuf(chain_file, nullptr, _IOFBF, 1 << 20);   // 1 MB buffer
+
+        // Write metadata (param count + names; sample count inferred from file size)
+        ofstream meta(meta_path);
+        meta << dim << "\n";
+        if (ecc)
+            meta << "period amplitude offset phase eccentricity omega\n";
+        else
+            meta << "period amplitude offset phase\n";
+        meta.close();
+
+        int expected = Nsim / chain_thin;
+        cout << "Chain output: " << bin_path
+             << "  (thin=" << chain_thin
+             << ", expected ~" << expected << " samples)\n";
     }
 
     // ---- LC prior ----
@@ -204,22 +155,37 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         lc_powers  = move(sw);
     }
 
-    // ---- parameter bounds in INTERNAL space ----
-    // Internal space uses log10(period); everything else is the same.
+// ---- parameter bounds in INTERNAL space ----
     vector<double> lo(dim), hi(dim);
-    lo[iLPER] = log_min_p;         hi[iLPER] = log_max_p;
-    lo[iAMP]  = 0.0;               hi[iAMP]  = cfg.amp_lim;
-    lo[iOFF]  = -cfg.offset_lim;   hi[iOFF]  = cfg.offset_lim;
-    lo[iPH]   = -0.5;              hi[iPH]   = 0.5;
+    lo[iLPER] = log_min_p;
+    hi[iLPER] = log_max_p;
+    lo[iAMP]  = cfg.amp_min;
+    hi[iAMP]  = cfg.amp_max > 0 ? cfg.amp_max : cfg.amp_lim;
+    lo[iOFF]  = cfg.offset_min != 0 ? cfg.offset_min : -cfg.offset_lim;
+    hi[iOFF]  = cfg.offset_max != 0 ? cfg.offset_max : cfg.offset_lim;
+    lo[iPH]   = cfg.phase_min;
+    hi[iPH]   = cfg.phase_max;
     if (ecc) {
-        lo[iECC] = 0.0;   hi[iECC] = 0.9999;
-        lo[iOMG] = 0.0;   hi[iOMG] = 360.0;
+        lo[iECC] = cfg.ecc_min;
+        hi[iECC] = cfg.ecc_max;
+        lo[iOMG] = cfg.omega_min;
+        hi[iOMG] = cfg.omega_max;
     }
 
-    // ---- convert internal theta → real period for model evaluation ----
+    // Print bounds
+    cout << "Parameter bounds:\n"
+         << "  Period:     " << cfg.min_period << " - " << cfg.max_period << " d\n"
+         << "  Amplitude:  " << lo[iAMP] << " - " << hi[iAMP] << "\n"
+         << "  Offset:     " << lo[iOFF] << " - " << hi[iOFF] << "\n"
+         << "  Phase:      " << lo[iPH] << " - " << hi[iPH] << "\n";
+    if (ecc) {
+        cout << "  Ecc:        " << lo[iECC] << " - " << hi[iECC] << "\n"
+             << "  Omega:      " << lo[iOMG] << " - " << hi[iOMG] << " deg\n";
+    }
+
     auto to_real_period = [](double log_p) { return pow(10.0, log_p); };
 
-    // ---- chi-squared (takes internal-space theta) ----
+    // ---- chi-squared ----
     auto chi2 = [&](const vector<double>& theta) -> double {
         double period = to_real_period(theta[iLPER]);
         double sum = 0.0;
@@ -235,15 +201,13 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         return sum;
     };
 
-    // ---- log-posterior (internal space, unnormalised) ----
+    // ---- log-posterior ----
     auto logpost = [&](const vector<double>& theta) -> double {
         for (int i = 0; i < dim; ++i)
             if (theta[i] < lo[i] || theta[i] > hi[i])
                 return -1e300;
         double lp = -0.5 * chi2(theta);
-        // Jacobian: d(period)/d(log10_period) = period * ln(10)
-        // This ensures uniform-in-log-period prior maps correctly.
-        lp += theta[iLPER] * log(10.0);  // = log(period * ln10) up to const
+        lp += theta[iLPER] * log(10.0);
         if (cfg.lc_prior) {
             double pw = interp_prior(lc_periods, lc_powers,
                                       to_real_period(theta[iLPER]));
@@ -267,12 +231,12 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
             if (p < cfg.min_period || p > cfg.max_period) continue;
             bool close = false;
             for (double sp : seed_periods)
-                if (fabs(p - sp) / sp < 0.01) { close = true; break; }
+                if (fabs(p - sp) / p < 0.01) { close = true; break; }
             if (!close) seed_periods.push_back(p);
         }
     }
 
-    // ---- initial state (internal space) ----
+    // ---- initial state ----
     double start_lp  = (cfg.period_0 > 0 && cfg.period_0 >= cfg.min_period
                          && cfg.period_0 <= cfg.max_period)
                         ? log10(cfg.period_0)
@@ -288,7 +252,6 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
     double start_omg = (ecc && cfg.omega_0 > 0 && cfg.omega_0 <= 360)
                        ? cfg.omega_0 : 180.0;
 
-    // One state vector per temperature chain
     vector<vector<double>> state(Ntemp, vector<double>(dim));
     vector<double>         state_lp(Ntemp);
 
@@ -309,10 +272,8 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
     }
 
     // ---- initial proposal covariance ----
-    // Now in internal space: log10(period), so step is additive
     double sLP = cfg.period_step > 0
-                 ? cfg.period_step * 0.4343  // convert fractional to log10 scale
-                 : 0.02;                     // ~5% in period
+                 ? cfg.period_step * 0.4343 : 0.02;
     double sA  = cfg.amp_step    > 0 ? cfg.amp_step    : 0.5;
     double sO  = cfg.offset_step > 0 ? cfg.offset_step : 0.5;
     double sPh = cfg.phase_step  > 0 ? cfg.phase_step  : 0.05;
@@ -329,10 +290,8 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         init_sigma[iOMG] = sW;
     }
 
-    // Optimal scaling: s_d = 2.38^2 / d
     double sd = 2.38 * 2.38 / (double)dim;
 
-    // Proposal covariance C  (one shared across all chains; adapted from T=1)
     vector<vector<double>> C(dim, vector<double>(dim, 0.0));
     for (int i = 0; i < dim; ++i)
         C[i][i] = init_sigma[i] * init_sigma[i];
@@ -358,7 +317,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
     vector<vector<double>> L = do_cholesky(C);
     double global_scale = sd;
 
-    // ---- Welford online mean/covariance for adaptation (T=1 chain) ----
+    // ---- Welford online mean/covariance ----
     long   welford_n = 0;
     vector<double> welford_mean(dim, 0.0);
     vector<vector<double>> welford_M2(dim, vector<double>(dim, 0.0));
@@ -371,12 +330,10 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
             dx[i] = x[i] - welford_mean[i];
             welford_mean[i] += dx[i] / n;
         }
-        // After updating mean, compute dx2 = x - new_mean
         for (int i = 0; i < dim; ++i) {
             double dx2_i = x[i] - welford_mean[i];
             for (int k = 0; k < dim; ++k) {
-                double dx2_k = x[k] - welford_mean[k];
-                welford_M2[i][k] += dx[i] * dx2_k;
+                welford_M2[i][k] += dx[i] * (x[k] - welford_mean[k]);
             }
         }
     };
@@ -391,18 +348,16 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         return cov;
     };
 
-    // ---- per-chain RNG (avoids thread contention) ----
+    // ---- per-chain RNG ----
     vector<mt19937> gens(Ntemp);
     {
         random_device rd;
         for (int t = 0; t < Ntemp; ++t)
             gens[t].seed(rd() + t * 12345);
     }
-    // Separate RNG for swaps and adaptation (main thread)
     mt19937 gen_main(random_device{}());
     uniform_real_distribution<> unif01(0.0, 1.0);
 
-    // ---- per-chain acceptance counters ----
     vector<int> chain_accepted(Ntemp, 0);
     vector<int> chain_tried(Ntemp, 0);
 
@@ -422,7 +377,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
 
     for (int j = 0; j < Ntot; ++j) {
 
-        // ---- progress / plotting (every logfreq steps) ----
+        // ---- progress / plotting ----
         if (j > 0 && j % logfreq == 0) {
             auto now = chrono::high_resolution_clock::now();
             double ms = chrono::duration<double,milli>(now-t0).count();
@@ -438,9 +393,9 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
                  << "  Scale: " << scientific << setprecision(2) << global_scale
                  << "  Speed: " << fixed << setprecision(3) << ms/j << " ms/it"
                  << "  P(T=1)=" << setprecision(4) << to_real_period(state[0][iLPER]) << "d"
+                 << "  Chain=" << chain_count
                  << "    " << flush;
 
-            // Reset window counters
             for (int t = 0; t < Ntemp; ++t) {
                 chain_accepted[t] = 0;
                 chain_tried[t] = 0;
@@ -474,9 +429,8 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         }
 
         // ============================================================
-        //  1. Parallel MH step for all temperature chains
+        //  1. Parallel MH step
         // ============================================================
-        // Snapshot shared proposal for this iteration (avoid races)
         const auto L_snap = L;
         const double scale_snap = global_scale;
 
@@ -485,11 +439,9 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
             normal_distribution<>        norm01(0.0, 1.0);
             uniform_real_distribution<>  u01(0.0, 1.0);
 
-            // Draw z ~ N(0,I), compute proposal = state + sqrt(scale)*L*z
             vector<double> z(dim), prop(dim);
             for (int i = 0; i < dim; ++i) z[i] = norm01(gens[t]);
 
-            // L * z
             vector<double> Lz(dim, 0.0);
             for (int i = 0; i < dim; ++i)
                 for (int k = 0; k <= i; ++k)
@@ -498,19 +450,25 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
             for (int i = 0; i < dim; ++i)
                 prop[i] = state[t][i] + sqrt(scale_snap) * Lz[i];
 
-            // Wrap phase to [-0.5, 0.5]
+            // Wrap periodic parameters
             while (prop[iPH] >  0.5) prop[iPH] -= 1.0;
             while (prop[iPH] < -0.5) prop[iPH] += 1.0;
-
-            // Wrap omega to [0, 360]
             if (ecc) {
                 while (prop[iOMG] <   0.0) prop[iOMG] += 360.0;
                 while (prop[iOMG] > 360.0) prop[iOMG] -= 360.0;
             }
 
-            double prop_lp = logpost(prop);
+            // Reflect non-wrapped parameters at boundaries
+            for (int i = 0; i < dim; ++i) {
+                if (i == iPH) continue;
+                if (ecc && i == iOMG) continue;
+                while (prop[i] < lo[i] || prop[i] > hi[i]) {
+                    if (prop[i] < lo[i]) prop[i] = lo[i] + (lo[i] - prop[i]);
+                    if (prop[i] > hi[i]) prop[i] = hi[i] - (prop[i] - hi[i]);
+                }
+            }
 
-            // Tempered acceptance
+            double prop_lp = logpost(prop);
             double log_alpha = (prop_lp - state_lp[t]) / temperatures[t];
 
             if (log(u01(gens[t])) < log_alpha) {
@@ -524,19 +482,15 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         }
 
         // ============================================================
-        //  2. Parallel tempering swaps (main thread only)
+        //  2. Parallel tempering swaps
         // ============================================================
         if (Ntemp > 1 && j % cfg.swap_interval == 0) {
-            // Sweep through all adjacent pairs (even-odd scheme)
-            // This gives every pair a chance each sweep.
             int parity = (j / cfg.swap_interval) % 2;
             for (int t1 = parity; t1 + 1 < Ntemp; t1 += 2) {
                 int t2 = t1 + 1;
                 ++n_swaps_tried;
-
                 double log_swap = (state_lp[t1] - state_lp[t2])
                     * (1.0/temperatures[t2] - 1.0/temperatures[t1]);
-
                 if (log(unif01(gen_main)) < log_swap) {
                     swap(state[t1],    state[t2]);
                     swap(state_lp[t1], state_lp[t2]);
@@ -546,29 +500,22 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         }
 
         // ============================================================
-        //  3. Adaptive Metropolis (from T=1 chain, main thread)
+        //  3. Adaptive Metropolis
         // ============================================================
         if (j >= cfg.adapt_start) {
-            // Feed T=1 state into Welford accumulator
             welford_update(state[0]);
 
             if (j % cfg.adapt_interval == 0 && welford_n > 2 * dim) {
                 ++adapt_count;
-
-                // Get empirical covariance
                 auto emp_cov = welford_covariance();
-
-                // Regularise: C = (1-eps)*emp + eps*C_initial
                 double eps = 0.01;
                 for (int i = 0; i < dim; ++i)
                     for (int k = 0; k < dim; ++k)
                         C[i][k] = (1.0-eps) * emp_cov[i][k]
                                   + (i==k ? eps * init_sigma[i]*init_sigma[i]
                                           : 0.0);
-
                 L = do_cholesky(C);
 
-                // Robbins-Monro scale tuning
                 double curr_rate = chain_tried[0] > 0
                     ? (double)chain_accepted[0] / chain_tried[0]
                     : cfg.target_accept;
@@ -582,52 +529,33 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
         }
 
         // ============================================================
-        //  4. Record T=1 chain into histograms (post burn-in)
+        //  4. Write T=1 chain sample (post burn-in, thinned)
         // ============================================================
         if (j < Nburn) continue;
+        if ((j - Nburn) % chain_thin != 0) continue;
 
-        const auto& s = state[0];
-        double real_period = to_real_period(s[iLPER]);
-
-        auto binof = [](const vector<double>& edges, double val) -> int {
-            return (int)(lower_bound(edges.begin(), edges.end(), val)
-                         - edges.begin()) - 1;
-        };
-        auto ok = [](int b, int mx) { return b >= 0 && b < mx; };
-
-        int bp  = binof(period_edges, real_period);
-        int ba  = binof(amp_edges,    s[iAMP]);
-        int bo  = binof(offset_edges, s[iOFF]);
-        int bph = binof(phase_edges,  s[iPH]);
-
-        bool pOK  = ok(bp,  Nx);
-        bool aOK  = ok(ba,  Ny);
-        bool oOK  = ok(bo,  Ny);
-        bool phOK = ok(bph, Ny);
-
-        if (pOK && aOK)  period_amp_histogram   [bp][ba]   += 1;
-        if (pOK && oOK)  period_offset_histogram[bp][bo]   += 1;
-        if (pOK && phOK) period_phase_histogram [bp][bph]  += 1;
-        if (aOK && oOK)  amp_offset_histogram   [ba][bo]   += 1;
-        if (aOK && phOK) amp_phase_histogram    [ba][bph]  += 1;
-        if (oOK && phOK) offset_phase_histogram [bo][bph]  += 1;
-
-        if (ecc) {
-            int be = binof(ecc_edges,   s[iECC]);
-            int bw = binof(omega_edges, s[iOMG]);
-            bool eOK = ok(be, Ny);
-            bool wOK = ok(bw, Ny);
-
-            if (pOK  && eOK) period_ecc_histogram  [bp] [be] += 1;
-            if (pOK  && wOK) period_omega_histogram [bp] [bw] += 1;
-            if (aOK  && eOK) amp_ecc_histogram      [ba] [be] += 1;
-            if (aOK  && wOK) amp_omega_histogram     [ba] [bw] += 1;
-            if (oOK  && eOK) offset_ecc_histogram   [bo] [be] += 1;
-            if (oOK  && wOK) offset_omega_histogram  [bo] [bw] += 1;
-            if (phOK && eOK) phase_ecc_histogram    [bph][be] += 1;
-            if (phOK && wOK) phase_omega_histogram  [bph][bw] += 1;
-            if (eOK  && wOK) ecc_omega_histogram     [be] [bw] += 1;
+        if (chain_file) {
+            const auto& s = state[0];
+            double row[6];
+            row[0] = to_real_period(s[iLPER]);  // period in days
+            row[1] = s[iAMP];                   // amplitude
+            row[2] = s[iOFF];                   // offset
+            row[3] = s[iPH];                    // phase [-0.5, 0.5]
+            if (ecc) {
+                row[4] = s[iECC];               // eccentricity
+                row[5] = s[iOMG];               // omega in degrees
+            }
+            fwrite(row, sizeof(double), dim, chain_file);
+            ++chain_count;
         }
+    }
+
+    // ---- close chain file ----
+    if (chain_file) {
+        fclose(chain_file);
+        cout << "\nChain: " << chain_count << " samples written to "
+             << cfg.chain_output_dir << "chain.bin"
+             << " (" << (chain_count * dim * 8) / (1024*1024) << " MB)\n";
     }
 
     // ---- summary ----
@@ -635,13 +563,13 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
          << "Final proposal scale: " << scientific << global_scale << "\n"
          << "Swap acceptance: "
          << (n_swaps_tried > 0 ? 100.0*n_swaps_accepted/n_swaps_tried : 0)
-         << "%\n";
+         << "%\n"
+         << "Chain samples: " << chain_count
+         << " (thin=" << chain_thin << ")\n";
 
-    // Print learned correlation matrix
-    cout << "\nLearned proposal correlations:\n";
     const char* names[] = {"log(P)", "  amp ", "offset", " phase",
                            "  ecc ", " omega"};
-    cout << "         ";
+    cout << "\nLearned proposal correlations:\n         ";
     for (int i = 0; i < dim; ++i) cout << setw(8) << names[i];
     cout << "\n";
     auto cov = welford_covariance();
@@ -665,7 +593,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
 
 
 // ===================================================================
-//  Grid-based orbit prediction (unchanged from original)
+//  Grid-based orbit prediction (unchanged)
 // ===================================================================
 void Star::calculate_orbit_prediction(int Nx, int Ny,
                                       double amp_lim, double offset_lim) {
@@ -775,7 +703,7 @@ void Star::calculate_orbit_prediction(int Nx, int Ny,
 
 
 // ===================================================================
-//  Binary MCMC (kept unchanged, renamed from twod_amp_prediciton_binary)
+//  Binary MCMC (unchanged)
 // ===================================================================
 void Star::run_rv_mcmc_binary(
         int Nx, int Ny, double amp_lim, double offset_lim,

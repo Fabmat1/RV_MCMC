@@ -2,11 +2,9 @@
 //  rv_mcmc.cpp  –  Unified entry point for circular and eccentric
 //                  MCMC fitting of radial-velocity curves.
 //
-//  Replaces the former amp_mcmc.cpp and amp_mcmc_eccentric.cpp.
-//
-//  Usage:
-//      rv_mcmc <gaia-id> [options]               # circular fit
-//      rv_mcmc <gaia-id> --eccentric [options]    # eccentric fit
+//  Now writes raw MCMC chain to binary file instead of fixed-resolution
+//  histograms.  Post-processing (adaptive histograms, corner plots)
+//  is done in Python.
 //
 
 #include "models.h"
@@ -29,13 +27,11 @@
 #include <string>
 #include <vector>
 
-#include <unistd.h>   // chdir, getcwd
+#include <unistd.h>
 
 namespace po = boost::program_options;
 using namespace std;
 
-// ---------------------------------------------------------------
-//  Small helper – lowercase a string (used for LC-prior sources)
 // ---------------------------------------------------------------
 static string str_lower(string s) {
     transform(s.begin(), s.end(), s.begin(),
@@ -43,9 +39,6 @@ static string str_lower(string s) {
     return s;
 }
 
-// ---------------------------------------------------------------
-//  Fetch / compute the light-curve periodogram prior.
-//  Returns a 2-D vector [periods, powers] (empty on failure).
 // ---------------------------------------------------------------
 static vector<vector<double>> fetch_lc_prior(
         const string& gaia_id,
@@ -61,7 +54,6 @@ static vector<vector<double>> fetch_lc_prior(
     }
     string script_dir(lc_dir);
 
-    // Save and change directory
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) {
         cerr << "ERROR: getcwd: " << strerror(errno) << "\n";
@@ -73,7 +65,6 @@ static vector<vector<double>> fetch_lc_prior(
         return {};
     }
 
-    // Parse requested sources
     vector<string> requested;
     {
         istringstream ss(lc_prior_source);
@@ -112,8 +103,6 @@ static vector<vector<double>> fetch_lc_prior(
     cout << "Running LC prior: " << cmd_str << "\n";
     int ret = system(cmd_str.c_str());
 
-    // Restore working directory before checking result
-// Restore working directory before checking result
     if (chdir(cwd) != 0) {
         cerr << "ERROR: failed to restore directory '" << cwd
              << "': " << strerror(errno) << "\n";
@@ -128,37 +117,11 @@ static vector<vector<double>> fetch_lc_prior(
                         + "/multiplied_pgram.txt";
     auto data = readCSV(pgram_file, true);
 
-    // In ellipsoidal mode, double the periods
     if (ellipsoidal && !data.empty() && !data[0].empty()) {
         cout << "Ellipsoidal mode: scaling LC periods by 2x\n";
         for (auto& v : data[0]) v *= 2.0;
     }
     return data;
-}
-
-// ---------------------------------------------------------------
-//  Save all corner-plot histograms that are non-empty
-// ---------------------------------------------------------------
-static void save_histograms(const string& folder, Star& star, bool eccentric) {
-    // 6 base-parameter combinations
-    saveCSV(folder + "period_vs_amplitude.csv", star.period_amp_histogram);
-    saveCSV(folder + "period_vs_offset.csv",    star.period_offset_histogram);
-    saveCSV(folder + "period_vs_phase.csv",     star.period_phase_histogram);
-    saveCSV(folder + "amplitude_vs_offset.csv", star.amp_offset_histogram);
-    saveCSV(folder + "amplitude_vs_phase.csv",  star.amp_phase_histogram);
-    saveCSV(folder + "offset_vs_phase.csv",     star.offset_phase_histogram);
-
-    if (eccentric) {
-        saveCSV(folder + "period_vs_eccentricity.csv",    star.period_ecc_histogram);
-        saveCSV(folder + "period_vs_omega.csv",           star.period_omega_histogram);
-        saveCSV(folder + "amplitude_vs_eccentricity.csv", star.amp_ecc_histogram);
-        saveCSV(folder + "amplitude_vs_omega.csv",        star.amp_omega_histogram);
-        saveCSV(folder + "offset_vs_eccentricity.csv",    star.offset_ecc_histogram);
-        saveCSV(folder + "offset_vs_omega.csv",           star.offset_omega_histogram);
-        saveCSV(folder + "phase_vs_eccentricity.csv",     star.phase_ecc_histogram);
-        saveCSV(folder + "phase_vs_omega.csv",            star.phase_omega_histogram);
-        saveCSV(folder + "eccentricity_vs_omega.csv",     star.ecc_omega_histogram);
-    }
 }
 
 // ---------------------------------------------------------------
@@ -174,10 +137,18 @@ static void save_metadata(const string& folder, const string& gaia_id,
       << "Period range: " << cfg.min_period << " - " << cfg.max_period << " days\n"
       << "Number of samples: " << cfg.n_samples << "\n"
       << "Number of burn-in samples: " << cfg.n_burn_in << "\n"
-      << "Period bins x Param bins: " << cfg.n_period_bins << " x " << cfg.n_param_bins << "\n"
-      << "Amplitude limit: " << cfg.amp_lim << "\n"
-      << "Offset limit: " << cfg.offset_lim << "\n"
-      << "\nStep sizes:\n"
+      << "Chain thinning factor: " << cfg.chain_thin << "\n"
+      << "\nParameter bounds:\n"
+      << "  Amplitude: " << cfg.amp_min << " - " 
+      << (cfg.amp_max > 0 ? cfg.amp_max : cfg.amp_lim) << "\n"
+      << "  Offset:    " << (cfg.offset_min != 0 ? cfg.offset_min : -cfg.offset_lim) 
+      << " - " << (cfg.offset_max != 0 ? cfg.offset_max : cfg.offset_lim) << "\n"
+      << "  Phase:     " << cfg.phase_min << " - " << cfg.phase_max << "\n";
+    if (cfg.eccentric) {
+        f << "  Ecc:       " << cfg.ecc_min << " - " << cfg.ecc_max << "\n"
+          << "  Omega:     " << cfg.omega_min << " - " << cfg.omega_max << " deg\n";
+    }
+    f << "\nStep sizes:\n"
       << "  Period:        " << cfg.period_step << "\n"
       << "  Amplitude:     " << cfg.amp_step << "\n"
       << "  Offset:        " << cfg.offset_step << "\n"
@@ -208,7 +179,6 @@ static void save_metadata(const string& folder, const string& gaia_id,
 // ===============================================================
 int main(int argc, char* argv[]) {
 
-    // ---------- declare all CLI variables ----------
     string gaia_id;
     string out_path      = "out/";
     string input_path;
@@ -217,7 +187,6 @@ int main(int argc, char* argv[]) {
     MCMCConfig cfg;
     bool ellipsoidal = false;
 
-    // -------- define options --------
     try {
         po::options_description desc("Allowed options");
         desc.add_options()
@@ -227,30 +196,45 @@ int main(int argc, char* argv[]) {
                 po::value<string>(&gaia_id)->required(),
                 "GAIA ID (positional)")
 
-            // --- mode ---
             ("eccentric",
                 po::bool_switch(&cfg.eccentric),
                 "Use Keplerian (eccentric) RV model instead of sinusoidal")
 
-            // --- period range / MCMC size ---
             ("l",  po::value<double>(&cfg.min_period),
                 "Low period bound (days)")
             ("h",  po::value<double>(&cfg.max_period),
                 "High period bound (days)")
             ("n",  po::value<int>(&cfg.n_samples),
                 "Number of post-burn-in MCMC samples")
-            ("r",  po::value<int>(&cfg.n_period_bins),
-                "Number of period bins")
             ("n-burn-in", po::value<int>(&cfg.n_burn_in),
                 "Number of burn-in samples (default 1000000)")
 
-            // --- limits ---
             ("amp-lim",    po::value<double>(&cfg.amp_lim),
                 "Hard amplitude limit")
             ("offset-lim", po::value<double>(&cfg.offset_lim),
                 "Hard offset limit")
+            ("amp-min",    po::value<double>(&cfg.amp_min),
+                "Minimum amplitude bound (default 0)")
+            ("amp-max",    po::value<double>(&cfg.amp_max),
+                "Maximum amplitude bound (default amp-lim)")
+            ("offset-min", po::value<double>(&cfg.offset_min),
+                "Minimum offset bound (default -offset-lim)")
+            ("offset-max", po::value<double>(&cfg.offset_max),
+                "Maximum offset bound (default offset-lim)")
+            ("phase-min",  po::value<double>(&cfg.phase_min),
+                "Minimum phase bound (default -0.5)")
+            ("phase-max",  po::value<double>(&cfg.phase_max),
+                "Maximum phase bound (default 0.5)")
+            ("ecc-min",    po::value<double>(&cfg.ecc_min),
+                "Minimum eccentricity bound (default 0)")
+            ("ecc-max",    po::value<double>(&cfg.ecc_max),
+                "Maximum eccentricity bound (default 0.9999)")
+            ("omega-min",  po::value<double>(&cfg.omega_min),
+                "Minimum omega bound in degrees (default 0)")
+            ("omega-max",  po::value<double>(&cfg.omega_max),
+                "Maximum omega bound in degrees (default 360)")
 
-            // --- step sizes ---
+
             ("period-step",        po::value<double>(&cfg.period_step),
                 "Period proposal step (fractional)")
             ("amplitude-step",     po::value<double>(&cfg.amp_step),
@@ -264,7 +248,6 @@ int main(int argc, char* argv[]) {
             ("omega-step",         po::value<double>(&cfg.omega_step),
                 "Omega proposal step in degrees (eccentric only)")
 
-            // --- initial values ---
             ("period-0",        po::value<double>(&cfg.period_0),
                 "Period starting value")
             ("amplitude-0",     po::value<double>(&cfg.amp_0),
@@ -278,13 +261,11 @@ int main(int argc, char* argv[]) {
             ("omega-0",         po::value<double>(&cfg.omega_0),
                 "Omega starting value in degrees (eccentric only)")
 
-            // --- I/O ---
             ("out-dir", po::value<string>(&out_path),
                 "Output directory (default: out/)")
             ("input",   po::value<string>(&input_path),
                 "Input CSV file path")
 
-            // --- flags ---
             ("no-plot",   po::bool_switch(&cfg.noplot),
                 "Disable real-time gnuplot display")
             ("lc-prior",  po::bool_switch(&cfg.lc_prior),
@@ -295,7 +276,7 @@ int main(int argc, char* argv[]) {
             ("ellipsoidal", po::bool_switch(&ellipsoidal),
                 "With --lc-prior: compute LC periodogram at half the period "
                 "range then scale back (for ellipsoidal variations)")
-            // Add these to the options description:
+
             ("n-temperatures",  po::value<int>(&cfg.n_temperatures),
                 "Number of parallel tempering chains (default 8)")
             ("max-temperature", po::value<double>(&cfg.max_temperature),
@@ -304,6 +285,10 @@ int main(int argc, char* argv[]) {
                 "Attempt chain swap every N steps (default 20)")
             ("target-accept",   po::value<double>(&cfg.target_accept),
                 "Target acceptance rate for adaptation (default 0.234)")
+
+            ("thin", po::value<int>(&cfg.chain_thin),
+                "Chain thinning factor – save every Nth post-burn-in sample "
+                "(default 100)")
         ;
 
         po::positional_options_description pos;
@@ -317,13 +302,13 @@ int main(int argc, char* argv[]) {
             cout << "Usage: " << argv[0] << " <gaia-id> [options]\n\n"
                  << desc << "\n"
                  << "Examples:\n"
-                 << "  " << argv[0] << " 1234567890 -l 0.1 -h 100 -n 5000000 -r 100\n"
-                 << "  " << argv[0] << " 1234567890 --eccentric -l 0.1 -h 100 -n 5000000 -r 100 --lc-prior\n";
+                 << "  " << argv[0] << " 1234567890 -l 0.1 -h 100 -n 5000000\n"
+                 << "  " << argv[0] << " 1234567890 --eccentric -l 0.1 -h 100 -n 5000000 --lc-prior\n"
+                 << "  " << argv[0] << " 1234567890 -n 50000000 --thin 10   # finer chain\n";
             return 0;
         }
         po::notify(vm);
 
-        // Default input path
         if (input_path.empty()) {
 #ifdef __linux__
             input_path = string(getenv("HOME"))
@@ -381,6 +366,14 @@ int main(int argc, char* argv[]) {
 
     cout << "Saving periodogram...\n";
     saveCSV(folder + "pgram.csv", {star.periodogram_x, star.periodogram_y});
+    
+    // Save reference time for T₀ = t_ref + phase * period
+    double t_ref = get_min(rvs[3]);
+    {
+        ofstream trf(folder + "t_ref.txt");
+        trf << fixed << setprecision(10) << t_ref << "\n";
+    }
+    cout << "Reference time (BJD): " << fixed << setprecision(6) << t_ref << "\n";
 
     // ========== LC prior ==========
     if (cfg.lc_prior) {
@@ -393,6 +386,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ========== set chain output directory ==========
+    cfg.chain_output_dir = folder;
+
     // ========== run MCMC ==========
     cout << "\nRunning " << (cfg.eccentric ? "ECCENTRIC" : "CIRCULAR")
          << " MCMC\n"
@@ -400,23 +396,16 @@ int main(int argc, char* argv[]) {
          << cfg.max_period << " d\n"
          << "  Samples      : " << cfg.n_samples
          << " (+ " << cfg.n_burn_in << " burn-in)\n"
-         << "  Bins         : " << cfg.n_period_bins << " x "
-         << cfg.n_param_bins << "\n";
+         << "  Chain thin   : " << cfg.chain_thin << "\n";
     if (ellipsoidal && cfg.lc_prior)
         cout << "  Ellipsoidal  : ENABLED\n";
     cout << "\n";
 
     star.run_rv_mcmc(cfg);
 
-    // ========== save results ==========
-    // Legacy flat-file (backward compat)
-    string suffix = cfg.eccentric ? "_eccentric" : "";
-    saveCSV(out_path + "pamp_full" + gaia_id + suffix + ".csv",
-            star.period_amp_histogram);
-
-    save_histograms(folder, star, cfg.eccentric);
+    // ========== save metadata ==========
     save_metadata(folder, gaia_id, cfg, lc_prior_source, ellipsoidal);
 
-    cout << "Saved all corner-plot histograms to " << folder << "\n";
+    cout << "All output saved to " << folder << "\n";
     return 0;
 }

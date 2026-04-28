@@ -13,9 +13,21 @@ struct MCMCConfig {
     int n_period_bins  = 100;
     int n_param_bins   = 1000;
 
-    // Hard parameter limits
+    // Hard parameter limits (legacy - used as defaults)
     double amp_lim    = 500.0;
     double offset_lim = 500.0;
+
+    // Parameter bounds (configurable)
+    double amp_min    = 0.0;
+    double amp_max    = 0.0;      // 0 → use amp_lim
+    double offset_min = 0.0;      // 0 → use -offset_lim
+    double offset_max = 0.0;      // 0 → use offset_lim
+    double phase_min  = -0.5;
+    double phase_max  = 0.5;
+    double ecc_min    = 0.0;
+    double ecc_max    = 0.9999;
+    double omega_min  = 0.0;
+    double omega_max  = 360.0;
 
     // Period search range (days)
     double min_period = 0.05;
@@ -50,7 +62,7 @@ struct MCMCConfig {
 
     // --- Parallel tempering ---
     int    n_temperatures    = 16;       // number of temperature rungs
-    double max_temperature   = 10000.0;   // highest temperature
+    double max_temperature   = 100.0;   // highest temperature
     int    swap_interval     = 20;      // attempt swap every N steps
 
     // --- Adaptive Metropolis ---
@@ -59,6 +71,10 @@ struct MCMCConfig {
     double target_accept     = 0.234;   // optimal for d>=5 (Roberts et al. 1997)
     double adapt_scale_min   = 1e-12;    // floor on global scale factor
     double adapt_scale_max   = 100.0;   // ceiling on global scale factor
+
+    // Add to MCMCConfig struct:
+    int chain_thin = 10;                 // Thinning factor for chain output
+    std::string chain_output_dir = "";   // Directory for chain.bin / chain_meta.txt
 };
 
 
