@@ -79,7 +79,7 @@ double rv_curve(double t, double amplitude, double gamma, double period,
 //  accumulating into fixed-resolution histograms.  Adaptive binning
 //  and histogram construction happen in Python post-processing.
 // ===================================================================
-void Star::run_rv_mcmc(const MCMCConfig& cfg) {
+void RVMCMC_Star::run_rv_mcmc(const MCMCConfig& cfg) {
 
     const bool ecc = cfg.eccentric;
     const int  dim = ecc ? 6 : 4;
@@ -605,7 +605,7 @@ void Star::run_rv_mcmc(const MCMCConfig& cfg) {
 // ===================================================================
 //  Grid-based orbit prediction (unchanged)
 // ===================================================================
-void Star::calculate_orbit_prediction(int Nx, int Ny,
+void RVMCMC_Star::calculate_orbit_prediction(int Nx, int Ny,
                                       double amp_lim, double offset_lim) {
     if (periodogram_x.empty() || periodogram_y.empty()) return;
 
@@ -715,7 +715,7 @@ void Star::calculate_orbit_prediction(int Nx, int Ny,
 // ===================================================================
 //  Binary MCMC (unchanged)
 // ===================================================================
-void Star::run_rv_mcmc_binary(
+void RVMCMC_Star::run_rv_mcmc_binary(
         int Nx, int Ny, double amp_lim, double offset_lim,
         int N_sim, double min_p, double max_p,
         double min_p_two, double max_p_two,
@@ -848,7 +848,7 @@ void Star::run_rv_mcmc_binary(
 // ===================================================================
 //  process_star (unchanged)
 // ===================================================================
-void Star::process_star(int index, double forced_min_p,
+void RVMCMC_Star::process_star(int index, double forced_min_p,
                         double forced_max_p, int forced_N) {
     vector<double> opt = genOptimalPeriodogramSamples(
         samples, 20, forced_min_p, forced_max_p, forced_N);
@@ -890,7 +890,7 @@ void Star::process_star(int index, double forced_min_p,
 // ===================================================================
 //  sort_samples (unchanged)
 // ===================================================================
-void Star::sort_samples() {
+void RVMCMC_Star::sort_samples() {
     vector<size_t> idx(samples.size());
     iota(idx.begin(), idx.end(), 0);
     sort(idx.begin(), idx.end(),

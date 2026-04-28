@@ -2,7 +2,7 @@
 //
 //  Public C++ API of the RV_MCMC submodule.
 //  IMPORTANT: this header is the *only* one ASTRA should include.
-//             It must NOT pull in models.h (which leaks `Star`).
+//             It must NOT pull in models.h (which leaks `RVMCMC_Star`).
 //
 
 #include <map>

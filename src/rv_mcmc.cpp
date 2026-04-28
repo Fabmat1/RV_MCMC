@@ -330,7 +330,7 @@ int main(int argc, char* argv[]) {
         cerr << "Warning: --ellipsoidal has no effect without --lc-prior\n";
 
     // ========== load data ==========
-    Star star;
+    RVMCMC_Star star;
     auto rvs = readCSV(input_path, true);
 
     star.samples          = vadd(rvs[3], -get_min(rvs[3]));

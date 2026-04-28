@@ -365,7 +365,7 @@ FitResult run_fit(const RVData& data, MCMCConfig cfg, const LCPriorData* lc_prio
     }
 
     // ---- shift time origin ----
-    Star star;
+    RVMCMC_Star star;
     double t_ref = *std::min_element(data.bjd.begin(), data.bjd.end());
     R.t_ref = t_ref;
     star.samples          = vadd(data.bjd, -t_ref);

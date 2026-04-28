@@ -7,9 +7,9 @@
 using MCMCConfig = rv_mcmc::MCMCConfig;
 
 // ---------------------------------------------------------------------------
-//  Star
+//  RVMCMC_Star
 // ---------------------------------------------------------------------------
-struct Star {
+struct RVMCMC_Star {
     double amplitude = 0.0;
     double period    = 0.0;
     double offset    = 0.0;
