@@ -3,7 +3,6 @@
 #include "vector_operations.h"
 #include "file_io.h"
 #include "lomb_scargle_periodogram.h"
-#include "gnuplot-iostream.h"
 
 #include <algorithm>
 #include <cassert>
