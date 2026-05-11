@@ -401,10 +401,15 @@ FitResult run_fit(const RVData& data, MCMCConfig cfg, const LCPriorData* lc_prio
         cfg.lc_pgram_data.clear();
     }
 
-    // ---- in-memory chain output ----
-    std::vector<std::vector<double>> chain;
-    chain.reserve(cfg.n_samples / std::max(cfg.chain_thin, 1) + 1024);
-    cfg.chain_buffer     = &chain;
+        // ---- in-memory chain output ----
+    // Honour a caller-supplied buffer (used by ASTRA for live progress
+    // polling). Fall back to a local one if none was provided.
+    std::vector<std::vector<double>> local_chain;
+    std::vector<std::vector<double>>* chain_ptr =
+        cfg.chain_buffer ? cfg.chain_buffer : &local_chain;
+    chain_ptr->clear();
+    chain_ptr->reserve(cfg.n_samples / std::max(cfg.chain_thin, 1) + 1024);
+    cfg.chain_buffer     = chain_ptr;
     cfg.chain_output_dir = "";       // no file output
     cfg.noplot           = true;     // disable gnuplot in library mode
 
@@ -415,7 +420,7 @@ FitResult run_fit(const RVData& data, MCMCConfig cfg, const LCPriorData* lc_prio
         R.error_message = std::string("MCMC failed: ") + e.what();
         return R;
     }
-    if (chain.empty()) {
+    if (chain_ptr->empty()) {
         R.error_message = "MCMC produced no samples";
         return R;
     }
@@ -425,7 +430,7 @@ FitResult run_fit(const RVData& data, MCMCConfig cfg, const LCPriorData* lc_prio
         ? std::vector<std::string>{"period","amplitude","offset","phase",
                                    "eccentricity","omega"}
         : std::vector<std::string>{"period","amplitude","offset","phase"};
-    R.chain = std::move(chain);
+    R.chain = std::move(*chain_ptr);
 
     // ---- bin counts (configurable) ----
     int n1d = cfg.n_param_bins  > 0 ? std::min(cfg.n_param_bins,  500) : 100;
